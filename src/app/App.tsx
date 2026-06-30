@@ -63,6 +63,17 @@ interface Notification {
   created_at: string;
 }
 
+interface Guide {
+  id: string;
+  supervisor_id: string;
+  student_id: string | null;
+  title: string;
+  description: string | null;
+  doc_type: "guide" | "demo" | "template" | "other";
+  file_path: string;
+  created_at: string;
+}
+
 // ─── Shared helpers ───────────────────────────────────────────────
 async function notify(userId: string, message: string) {
   await supabase.from("notifications").insert({ user_id: userId, message });
@@ -625,6 +636,7 @@ function StudentDashboard({ profile }: { profile: Profile }) {
   const [formError, setFormError] = useState("");
   const [formOk, setFormOk] = useState("");
   const fileRef = useRef<HTMLInputElement>(null);
+  const [studentGuides, setStudentGuides] = useState<Guide[]>([]);
 
   const navItems: NavItem[] = [
     { id: "overview",    label: "Overview",       icon: Home },
@@ -632,17 +644,20 @@ function StudentDashboard({ profile }: { profile: Profile }) {
     { id: "submissions", label: "Submissions",     icon: FileText },
     { id: "upload",      label: "Upload Chapter",  icon: Upload },
     { id: "feedback",    label: "Feedback",        icon: MessageSquare },
+    { id: "materials",   label: "Study Materials", icon: BookOpen },
   ];
 
   const load = useCallback(async () => {
     setLoading(true);
-    const [{ data: proj }, { data: subs }] = await Promise.all([
+    const [{ data: proj }, { data: subs }, { data: guides }] = await Promise.all([
       supabase.from("projects").select("*").eq("student_id", profile.id).maybeSingle(),
       supabase.from("submissions").select("*").eq("student_id", profile.id).order("submission_date", { ascending: false }),
+      supabase.from("guides").select("*").or(`student_id.eq.${profile.id},student_id.is.null`).order("created_at", { ascending: false }),
     ]);
     setProject(proj ?? null);
     const s = subs ?? [];
     setSubmissions(s);
+    setStudentGuides(guides ?? []);
     if (s.length > 0) {
       const { data: fb } = await supabase
         .from("feedback").select("*, profiles(full_name)")
@@ -986,6 +1001,54 @@ function StudentDashboard({ profile }: { profile: Profile }) {
           )}
         </div>
       )}
+
+      {/* STUDY MATERIALS */}
+      {view === "materials" && (
+        <div className="max-w-4xl space-y-5">
+          <div className="bg-white rounded-xl border border-black/[0.06] shadow-sm overflow-hidden">
+            <p className="px-5 py-4 text-sm font-semibold text-gray-800 border-b border-gray-100">Study Materials ({studentGuides.length})</p>
+            {studentGuides.length === 0 ? (
+              <EmptyState icon={BookOpen} title="No materials uploaded yet" description="Your supervisor has not shared any study materials." />
+            ) : (
+              <div className="divide-y divide-gray-50">
+                {studentGuides.map((g) => {
+                  const typeLabel: Record<string, string> = { guide: "Writing Guide", demo: "Demo Paper", template: "Template", other: "Material" };
+                  const typeCls: Record<string, string> = {
+                    guide: "bg-indigo-50 text-indigo-700 border-indigo-200",
+                    demo: "bg-violet-50 text-violet-700 border-violet-200",
+                    template: "bg-emerald-50 text-emerald-700 border-emerald-200",
+                    other: "bg-gray-50 text-gray-600 border-gray-200",
+                  };
+                  return (
+                    <div key={g.id} className="px-5 py-4 flex items-center justify-between gap-4">
+                      <div className="min-w-0 flex items-start gap-3">
+                        <div className="w-9 h-9 bg-indigo-50 rounded-lg flex items-center justify-center flex-shrink-0 mt-0.5">
+                          <BookOpen className="w-4 h-4 text-indigo-500" strokeWidth={1.5} />
+                        </div>
+                        <div>
+                          <div className="flex items-center gap-2 flex-wrap mb-0.5">
+                            <p className="text-sm font-semibold text-gray-800">{g.title}</p>
+                            <span className={`text-[11px] font-medium px-2 py-0.5 rounded-full border ${typeCls[g.doc_type]}`}>{typeLabel[g.doc_type]}</span>
+                          </div>
+                          {g.description && <p className="text-xs text-gray-500">{g.description}</p>}
+                          <p className="text-[11px] text-gray-400 mt-0.5">{fmtDate(g.created_at)}</p>
+                        </div>
+                      </div>
+                      <button onClick={async () => {
+                        const { data, error } = await supabase.storage.from("guides").createSignedUrl(g.file_path, 3600);
+                        if (error) alert("Could not open: " + error.message);
+                        else if (data?.signedUrl) window.open(data.signedUrl, "_blank");
+                      }} className="inline-flex items-center gap-1.5 px-3 py-1.5 bg-indigo-50 hover:bg-indigo-100 text-indigo-700 text-xs font-medium rounded-lg border border-indigo-200 transition-colors">
+                        <Download className="w-3.5 h-3.5" /> Open
+                      </button>
+                    </div>
+                  );
+                })}
+              </div>
+            )}
+          </div>
+        </div>
+      )}
     </DashboardShell>
   );
 }
@@ -1010,6 +1073,7 @@ function SupervisorDashboard({ profile }: { profile: Profile }) {
     { id: "students",  label: "My Students",      icon: Users },
     { id: "review",    label: "Review Queue",     icon: Inbox },
     { id: "progress",  label: "Progress",         icon: TrendingUp },
+    { id: "materials", label: "Study Materials", icon: BookOpen },
   ];
 
   const load = useCallback(async () => {
@@ -1030,6 +1094,66 @@ function SupervisorDashboard({ profile }: { profile: Profile }) {
 
   const studentName = (id: string) => students.find((s) => s.id === id)?.full_name ?? "Student";
   const projectTitle = (projId: string) => projects.find((p: any) => p.id === projId)?.title ?? "";
+
+  const [guides, setGuides] = useState<Guide[]>([]);
+  const [gUploading, setGUploading] = useState(false);
+  const [gMsg, setGMsg] = useState<{ ok: boolean; text: string } | null>(null);
+  const [gTitle, setGTitle] = useState("");
+  const [gDesc, setGDesc] = useState("");
+  const [gType, setGType] = useState<Guide["doc_type"]>("guide");
+  const [gStudent, setGStudent] = useState<string>("");
+  const [gFile, setGFile] = useState<File | null>(null);
+  const gFileRef = useRef<HTMLInputElement>(null);
+
+  const loadGuides = useCallback(async () => {
+    const { data } = await supabase
+      .from("guides")
+      .select("*", { count: "exact" })
+      .eq("supervisor_id", profile.id)
+      .order("created_at", { ascending: false });
+    setGuides(data ?? []);
+  }, [profile.id]);
+
+  const uploadGuide = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!gFile) { setGMsg({ ok: false, text: "Please select a file." }); return; }
+    setGUploading(true); setGMsg(null);
+    const ext = gFile.name.split(".").pop();
+    const path = `${profile.id}/${gType}_${Date.now()}.${ext}`;
+    const { error: upErr } = await supabase.storage.from("guides").upload(path, gFile);
+    if (upErr) { setGMsg({ ok: false, text: "Upload failed: " + upErr.message }); setGUploading(false); return; }
+    const { error: insErr } = await supabase.from("guides").insert({
+      supervisor_id: profile.id,
+      student_id: gStudent || null,
+      title: gTitle, description: gDesc || null,
+      doc_type: gType, file_path: path,
+    });
+    if (insErr) {
+      setGMsg({ ok: false, text: insErr.message });
+    } else {
+      const targets = gStudent ? [gStudent] : students.map((s) => s.id);
+      const typeLabel = { guide: "Writing Guide", demo: "Demo Paper", template: "Template", other: "Material" }[gType];
+      await Promise.all(targets.map((uid) =>
+        notify(uid, `${profile.full_name} uploaded a new ${typeLabel}: "${gTitle}" — check Study Materials.`)
+      ));
+      setGMsg({ ok: true, text: "Material uploaded successfully!" });
+      setGTitle(""); setGDesc(""); setGType("guide"); setGStudent(""); setGFile(null);
+      if (gFileRef.current) gFileRef.current.value = "";
+      await load();
+    }
+    setGUploading(false);
+  };
+
+  const deleteGuide = async (g: Guide) => {
+    if (!confirm(`Delete "${g.title}"?`)) return;
+    await supabase.storage.from("guides").remove([g.file_path]);
+    await supabase.from("guides").delete().eq("id", g.id);
+    await load();
+  };
+
+  useEffect(() => {
+    loadGuides();
+  }, [loadGuides]);
 
   const reviewProject = async (proj: Project & { profiles?: { full_name: string } }, status: "approved" | "rejected") => {
     setActionId(proj.id);
@@ -1324,6 +1448,126 @@ function SupervisorDashboard({ profile }: { profile: Profile }) {
               </div>
             </div>
           )}
+        </div>
+      )}
+
+      {/* STUDY MATERIALS */}
+      {view === "materials" && (
+        <div className="max-w-4xl space-y-5">
+          <div className="bg-white rounded-xl border border-black/[0.06] shadow-sm p-6">
+            <p className="font-semibold text-gray-800 mb-1">Upload Study Material</p>
+            <p className="text-sm text-gray-500 mb-5">Upload writing guides, demo papers, or templates for your students to reference.</p>
+            {gMsg && (
+              <div className={`mb-4 p-3 rounded-lg text-sm border ${gMsg.ok ? "bg-emerald-50 text-emerald-700 border-emerald-200" : "bg-rose-50 text-rose-700 border-rose-200"}`}>
+                {gMsg.text}
+              </div>
+            )}
+            <form onSubmit={uploadGuide} className="space-y-4">
+              <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                <div>
+                  <label className={labelCls}>Title</label>
+                  <input type="text" value={gTitle} onChange={(e) => setGTitle(e.target.value)} required
+                    placeholder="e.g. How to Write Chapter 2" className={inputCls} />
+                </div>
+                <div>
+                  <label className={labelCls}>Document type</label>
+                  <select value={gType} onChange={(e) => setGType(e.target.value as Guide["doc_type"])} className={inputCls}>
+                    <option value="guide">Writing Guide</option>
+                    <option value="demo">Demo / Sample Paper</option>
+                    <option value="template">Template</option>
+                    <option value="other">Other Material</option>
+                  </select>
+                </div>
+              </div>
+              <div>
+                <label className={labelCls}>Description <span className="text-gray-400 font-normal">(optional)</span></label>
+                <input type="text" value={gDesc} onChange={(e) => setGDesc(e.target.value)}
+                  placeholder="Brief note on what this document covers" className={inputCls} />
+              </div>
+              <div>
+                <label className={labelCls}>Send to</label>
+                <select value={gStudent} onChange={(e) => setGStudent(e.target.value)} className={inputCls}>
+                  <option value="">All my students</option>
+                  {students.map((s) => <option key={s.id} value={s.id}>{s.full_name}</option>)}
+                </select>
+              </div>
+              <div>
+                <label className={labelCls}>File (PDF or DOCX, max 20 MB)</label>
+                <div onClick={() => gFileRef.current?.click()}
+                  className="border-2 border-dashed border-gray-200 hover:border-indigo-300 rounded-xl p-5 text-center cursor-pointer transition-colors">
+                  {gFile ? (
+                    <div className="flex items-center justify-center gap-2">
+                      <FileText className="w-5 h-5 text-indigo-500" />
+                      <span className="text-sm font-medium text-gray-700">{gFile.name}</span>
+                      <button type="button" onClick={(ev) => { ev.stopPropagation(); setGFile(null); }} className="text-gray-400 hover:text-gray-600 ml-1">
+                        <X className="w-4 h-4" />
+                      </button>
+                    </div>
+                  ) : (
+                    <>
+                      <Upload className="w-7 h-7 text-gray-300 mx-auto mb-2" />
+                      <p className="text-sm text-gray-500">Click to choose a file</p>
+                      <p className="text-xs text-gray-400 mt-1">PDF or DOCX</p>
+                    </>
+                  )}
+                </div>
+                <input ref={gFileRef} type="file" accept=".pdf,.docx,.doc" className="hidden"
+                  onChange={(e) => setGFile(e.target.files?.[0] ?? null)} />
+              </div>
+              <button type="submit" disabled={gUploading}
+                className="flex items-center gap-2 px-5 py-2.5 bg-indigo-600 hover:bg-indigo-700 text-white text-sm font-semibold rounded-lg disabled:opacity-50 transition-colors">
+                {gUploading && <Spinner size="sm" />} Upload material
+              </button>
+            </form>
+          </div>
+          <div className="bg-white rounded-xl border border-black/[0.06] shadow-sm overflow-hidden">
+            <p className="px-5 py-4 text-sm font-semibold text-gray-800 border-b border-gray-100">Uploaded Materials ({guides.length})</p>
+            {guides.length === 0 ? (
+              <EmptyState icon={BookOpen} title="No materials uploaded yet" description="Upload your first document above." />
+            ) : (
+              <div className="divide-y divide-gray-50">
+                {guides.map((g) => {
+                  const typeLabel: Record<string, string> = { guide: "Writing Guide", demo: "Demo Paper", template: "Template", other: "Material" };
+                  const typeCls: Record<string, string> = {
+                    guide: "bg-indigo-50 text-indigo-700 border-indigo-200",
+                    demo: "bg-violet-50 text-violet-700 border-violet-200",
+                    template: "bg-emerald-50 text-emerald-700 border-emerald-200",
+                    other: "bg-gray-50 text-gray-600 border-gray-200",
+                  };
+                  return (
+                    <div key={g.id} className="px-5 py-4 flex items-center justify-between gap-4">
+                      <div className="min-w-0 flex items-start gap-3">
+                        <div className="w-9 h-9 bg-indigo-50 rounded-lg flex items-center justify-center flex-shrink-0 mt-0.5">
+                          <BookOpen className="w-4 h-4 text-indigo-500" strokeWidth={1.5} />
+                        </div>
+                        <div>
+                          <div className="flex items-center gap-2 flex-wrap mb-0.5">
+                            <p className="text-sm font-semibold text-gray-800">{g.title}</p>
+                            <span className={`text-[11px] font-medium px-2 py-0.5 rounded-full border ${typeCls[g.doc_type]}`}>{typeLabel[g.doc_type]}</span>
+                            <span className="text-[11px] text-gray-400 bg-gray-100 px-2 py-0.5 rounded-full">{g.student_id ? studentName(g.student_id) : "All students"}</span>
+                          </div>
+                          {g.description && <p className="text-xs text-gray-500">{g.description}</p>}
+                          <p className="text-[11px] text-gray-400 mt-0.5">{fmtDate(g.created_at)}</p>
+                        </div>
+                      </div>
+                      <div className="flex items-center gap-2 flex-shrink-0">
+                        <button onClick={async () => {
+                          const { data, error } = await supabase.storage.from("guides").createSignedUrl(g.file_path, 3600);
+                          if (error) alert("Could not open: " + error.message);
+                          else if (data?.signedUrl) window.open(data.signedUrl, "_blank");
+                        }} className="inline-flex items-center gap-1.5 px-3 py-1.5 bg-indigo-50 hover:bg-indigo-100 text-indigo-700 text-xs font-medium rounded-lg border border-indigo-200 transition-colors">
+                          <Download className="w-3.5 h-3.5" /> Open
+                        </button>
+                        <button onClick={() => deleteGuide(g)} className="inline-flex items-center gap-1.5 px-3 py-1.5 bg-rose-50 hover:bg-rose-100 text-rose-600 text-xs font-medium rounded-lg border border-rose-200 transition-colors">
+                          <X className="w-3.5 h-3.5" /> Delete
+                        </button>
+                      </div>
+                    </div>
+                  );
+                })}
+              </div>
+            )}
+          </div>
         </div>
       )}
 
