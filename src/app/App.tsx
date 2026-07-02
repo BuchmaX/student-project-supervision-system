@@ -70,7 +70,8 @@ interface Guide {
   title: string;
   description: string | null;
   doc_type: "guide" | "demo" | "template" | "other";
-  file_path: string;
+  file_path: string | null;
+  url: string | null;
   created_at: string;
 }
 
@@ -811,8 +812,42 @@ function StudentDashboard({ profile }: { profile: Profile }) {
               <p className="text-gray-900 font-semibold text-lg leading-snug mb-2">{project.title}</p>
               <p className="text-xs text-gray-400">Submitted {fmtDate(project.created_at)}</p>
               {project.status === "rejected" && (
-                <div className="mt-4 p-3 bg-rose-50 border border-rose-200 rounded-lg text-sm text-rose-700">
-                  Your topic was rejected. Please consult your supervisor and resubmit a revised topic.
+                <div className="mt-4 space-y-3">
+                  <div className="p-3 bg-rose-50 border border-rose-200 rounded-lg text-sm text-rose-700">
+                    Your topic was rejected. Revise your title below and resubmit for approval.
+                  </div>
+                  {formError && <div className="p-3 bg-rose-50 border border-rose-200 rounded-lg text-sm text-rose-700">{formError}</div>}
+                  <form
+                    onSubmit={async (e) => {
+                      e.preventDefault();
+                      setSubmitting(true); setFormError("");
+                      const { error } = await supabase.from("projects")
+                        .update({ title: projectTitle, status: "proposed" })
+                        .eq("id", project.id);
+                      if (error) { setFormError(error.message); }
+                      else {
+                        if (profile.supervisor_id)
+                          await notify(profile.supervisor_id, `${profile.full_name} resubmitted their project topic: "${projectTitle}"`);
+                        setProjectTitle(""); await load();
+                      }
+                      setSubmitting(false);
+                    }}
+                    className="space-y-3"
+                  >
+                    <div>
+                      <label className={labelCls}>Revised project title</label>
+                      <input
+                        type="text" value={projectTitle}
+                        onChange={(e) => setProjectTitle(e.target.value)}
+                        required placeholder="Enter your revised topic title…"
+                        className={inputCls}
+                      />
+                    </div>
+                    <button type="submit" disabled={submitting}
+                      className="flex items-center gap-2 px-5 py-2.5 bg-indigo-600 hover:bg-indigo-700 text-white text-sm font-semibold rounded-lg disabled:opacity-50 transition-colors">
+                      {submitting && <Spinner size="sm" />} Resubmit for approval
+                    </button>
+                  </form>
                 </div>
               )}
               {project.status === "approved" && (
@@ -1034,11 +1069,14 @@ function StudentDashboard({ profile }: { profile: Profile }) {
                           <p className="text-[11px] text-gray-400 mt-0.5">{fmtDate(g.created_at)}</p>
                         </div>
                       </div>
-                      <button onClick={async () => {
-                        const { data, error } = await supabase.storage.from("guides").createSignedUrl(g.file_path, 3600);
-                        if (error) alert("Could not open: " + error.message);
-                        else if (data?.signedUrl) window.open(data.signedUrl, "_blank");
-                      }} className="inline-flex items-center gap-1.5 px-3 py-1.5 bg-indigo-50 hover:bg-indigo-100 text-indigo-700 text-xs font-medium rounded-lg border border-indigo-200 transition-colors">
+                      <button
+                        onClick={() => {
+                          const link = g.url ?? "";
+                          if (link) window.open(link, "_blank");
+                          else alert("No link available for this material.");
+                        }}
+                        className="inline-flex items-center gap-1.5 px-3 py-1.5 bg-indigo-50 hover:bg-indigo-100 text-indigo-700 text-xs font-medium rounded-lg border border-indigo-200 transition-colors"
+                      >
                         <Download className="w-3.5 h-3.5" /> Open
                       </button>
                     </div>
@@ -1096,14 +1134,13 @@ function SupervisorDashboard({ profile }: { profile: Profile }) {
   const projectTitle = (projId: string) => projects.find((p: any) => p.id === projId)?.title ?? "";
 
   const [guides, setGuides] = useState<Guide[]>([]);
-  const [gUploading, setGUploading] = useState(false);
+  const [gUrl, setGUrl] = useState("");
+  const [gSaving, setGSaving] = useState(false);
   const [gMsg, setGMsg] = useState<{ ok: boolean; text: string } | null>(null);
   const [gTitle, setGTitle] = useState("");
   const [gDesc, setGDesc] = useState("");
   const [gType, setGType] = useState<Guide["doc_type"]>("guide");
   const [gStudent, setGStudent] = useState<string>("");
-  const [gFile, setGFile] = useState<File | null>(null);
-  const gFileRef = useRef<HTMLInputElement>(null);
 
   const loadGuides = useCallback(async () => {
     const { data } = await supabase
@@ -1114,41 +1151,41 @@ function SupervisorDashboard({ profile }: { profile: Profile }) {
     setGuides(data ?? []);
   }, [profile.id]);
 
-  const uploadGuide = async (e: React.FormEvent) => {
+  const saveGuide = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!gFile) { setGMsg({ ok: false, text: "Please select a file." }); return; }
-    setGUploading(true); setGMsg(null);
-    const ext = gFile.name.split(".").pop();
-    const path = `${profile.id}/${gType}_${Date.now()}.${ext}`;
-    const { error: upErr } = await supabase.storage.from("guides").upload(path, gFile);
-    if (upErr) { setGMsg({ ok: false, text: "Upload failed: " + upErr.message }); setGUploading(false); return; }
-    const { error: insErr } = await supabase.from("guides").insert({
+    if (!gUrl.trim()) { setGMsg({ ok: false, text: "Please paste a shareable link." }); return; }
+    setGSaving(true); setGMsg(null);
+    const { error } = await supabase.from("guides").insert({
       supervisor_id: profile.id,
       student_id: gStudent || null,
-      title: gTitle, description: gDesc || null,
-      doc_type: gType, file_path: path,
+      title: gTitle,
+      description: gDesc || null,
+      doc_type: gType,
+      url: gUrl.trim(),
+      file_path: null,
     });
-    if (insErr) {
-      setGMsg({ ok: false, text: insErr.message });
+    if (error) {
+      setGMsg({ ok: false, text: error.message });
     } else {
       const targets = gStudent ? [gStudent] : students.map((s) => s.id);
       const typeLabel = { guide: "Writing Guide", demo: "Demo Paper", template: "Template", other: "Material" }[gType];
       await Promise.all(targets.map((uid) =>
-        notify(uid, `${profile.full_name} uploaded a new ${typeLabel}: "${gTitle}" — check Study Materials.`)
+        notify(uid, `${profile.full_name} shared a ${typeLabel}: "${gTitle}" — check Study Materials.`)
       ));
-      setGMsg({ ok: true, text: "Material uploaded successfully!" });
-      setGTitle(""); setGDesc(""); setGType("guide"); setGStudent(""); setGFile(null);
-      if (gFileRef.current) gFileRef.current.value = "";
+      setGMsg({ ok: true, text: "Material shared successfully!" });
+      setGTitle(""); setGDesc(""); setGType("guide"); setGStudent(""); setGUrl("");
       await load();
+      await loadGuides();
     }
-    setGUploading(false);
+    setGSaving(false);
   };
 
   const deleteGuide = async (g: Guide) => {
     if (!confirm(`Delete "${g.title}"?`)) return;
-    await supabase.storage.from("guides").remove([g.file_path]);
+    if (g.file_path) await supabase.storage.from("guides").remove([g.file_path]);
     await supabase.from("guides").delete().eq("id", g.id);
     await load();
+    await loadGuides();
   };
 
   useEffect(() => {
@@ -1455,14 +1492,20 @@ function SupervisorDashboard({ profile }: { profile: Profile }) {
       {view === "materials" && (
         <div className="max-w-4xl space-y-5">
           <div className="bg-white rounded-xl border border-black/[0.06] shadow-sm p-6">
-            <p className="font-semibold text-gray-800 mb-1">Upload Study Material</p>
-            <p className="text-sm text-gray-500 mb-5">Upload writing guides, demo papers, or templates for your students to reference.</p>
+            <p className="font-semibold text-gray-800 mb-1">Share Study Material</p>
+            <p className="text-sm text-gray-500 mb-2">
+              Paste a shareable link from Google Drive, OneDrive, Dropbox, or any other platform. No file storage used.
+            </p>
+            <div className="flex items-center gap-2 mb-5 p-3 bg-indigo-50 border border-indigo-100 rounded-lg">
+              <AlertCircle className="w-4 h-4 text-indigo-500 flex-shrink-0" />
+              <p className="text-xs text-indigo-700">Make sure the link is set to <strong>"Anyone with the link can view"</strong> before sharing.</p>
+            </div>
             {gMsg && (
               <div className={`mb-4 p-3 rounded-lg text-sm border ${gMsg.ok ? "bg-emerald-50 text-emerald-700 border-emerald-200" : "bg-rose-50 text-rose-700 border-rose-200"}`}>
                 {gMsg.text}
               </div>
             )}
-            <form onSubmit={uploadGuide} className="space-y-4">
+            <form onSubmit={saveGuide} className="space-y-4">
               <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
                 <div>
                   <label className={labelCls}>Title</label>
@@ -1492,31 +1535,14 @@ function SupervisorDashboard({ profile }: { profile: Profile }) {
                 </select>
               </div>
               <div>
-                <label className={labelCls}>File (PDF or DOCX, max 20 MB)</label>
-                <div onClick={() => gFileRef.current?.click()}
-                  className="border-2 border-dashed border-gray-200 hover:border-indigo-300 rounded-xl p-5 text-center cursor-pointer transition-colors">
-                  {gFile ? (
-                    <div className="flex items-center justify-center gap-2">
-                      <FileText className="w-5 h-5 text-indigo-500" />
-                      <span className="text-sm font-medium text-gray-700">{gFile.name}</span>
-                      <button type="button" onClick={(ev) => { ev.stopPropagation(); setGFile(null); }} className="text-gray-400 hover:text-gray-600 ml-1">
-                        <X className="w-4 h-4" />
-                      </button>
-                    </div>
-                  ) : (
-                    <>
-                      <Upload className="w-7 h-7 text-gray-300 mx-auto mb-2" />
-                      <p className="text-sm text-gray-500">Click to choose a file</p>
-                      <p className="text-xs text-gray-400 mt-1">PDF or DOCX</p>
-                    </>
-                  )}
-                </div>
-                <input ref={gFileRef} type="file" accept=".pdf,.docx,.doc" className="hidden"
-                  onChange={(e) => setGFile(e.target.files?.[0] ?? null)} />
+                <label className={labelCls}>Shareable link</label>
+                <input type="url" value={gUrl} onChange={(e) => setGUrl(e.target.value)} required
+                  placeholder="https://drive.google.com/file/d/... or OneDrive/Dropbox link"
+                  className={inputCls} />
               </div>
-              <button type="submit" disabled={gUploading}
+              <button type="submit" disabled={gSaving}
                 className="flex items-center gap-2 px-5 py-2.5 bg-indigo-600 hover:bg-indigo-700 text-white text-sm font-semibold rounded-lg disabled:opacity-50 transition-colors">
-                {gUploading && <Spinner size="sm" />} Upload material
+                {gSaving && <Spinner size="sm" />} Share material
               </button>
             </form>
           </div>
@@ -1551,11 +1577,14 @@ function SupervisorDashboard({ profile }: { profile: Profile }) {
                         </div>
                       </div>
                       <div className="flex items-center gap-2 flex-shrink-0">
-                        <button onClick={async () => {
-                          const { data, error } = await supabase.storage.from("guides").createSignedUrl(g.file_path, 3600);
-                          if (error) alert("Could not open: " + error.message);
-                          else if (data?.signedUrl) window.open(data.signedUrl, "_blank");
-                        }} className="inline-flex items-center gap-1.5 px-3 py-1.5 bg-indigo-50 hover:bg-indigo-100 text-indigo-700 text-xs font-medium rounded-lg border border-indigo-200 transition-colors">
+                        <button
+                          onClick={() => {
+                            const link = g.url ?? "";
+                            if (link) window.open(link, "_blank");
+                            else alert("No link available for this material.");
+                          }}
+                          className="inline-flex items-center gap-1.5 px-3 py-1.5 bg-indigo-50 hover:bg-indigo-100 text-indigo-700 text-xs font-medium rounded-lg border border-indigo-200 transition-colors"
+                        >
                           <Download className="w-3.5 h-3.5" /> Open
                         </button>
                         <button onClick={() => deleteGuide(g)} className="inline-flex items-center gap-1.5 px-3 py-1.5 bg-rose-50 hover:bg-rose-100 text-rose-600 text-xs font-medium rounded-lg border border-rose-200 transition-colors">
